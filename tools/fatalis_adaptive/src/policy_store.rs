@@ -23,6 +23,10 @@ struct Checkpoint {
 #[derive(Serialize, Deserialize)]
 struct Batch {
     events: Vec<Value>,
+    #[serde(default)]
+    invalidate: bool,
+    #[serde(default)]
+    invalidation_reason: Option<String>,
 }
 pub struct PolicyStore {
     engine: ScriptPolicy,
@@ -94,6 +98,14 @@ impl PolicyStore {
         baseline: &AiDocument,
         windows: &[CompletedRegisterWindow],
     ) -> Result<(), String> {
+        self.append_with_invalidation(baseline, windows, None)
+    }
+    pub fn append_with_invalidation(
+        &self,
+        baseline: &AiDocument,
+        windows: &[CompletedRegisterWindow],
+        reason: Option<&str>,
+    ) -> Result<(), String> {
         let mut events = Vec::with_capacity(windows.len());
         for w in windows {
             let table = baseline.table(&w.table_id).ok_or("unknown event table")?;
@@ -113,7 +125,12 @@ impl PolicyStore {
                 "started_at":w.started_at,"ended_at":w.ended_at,"counter":w.counter,
                 "player_fainted":null}));
         }
-        let mut bytes = serde_json::to_vec(&Batch { events }).map_err(|e| e.to_string())?;
+        let mut bytes = serde_json::to_vec(&Batch {
+            events,
+            invalidate: reason.is_some(),
+            invalidation_reason: reason.map(str::to_owned),
+        })
+        .map_err(|e| e.to_string())?;
         bytes.push(b'\n');
         let mut file = OpenOptions::new()
             .create(true)
@@ -147,7 +164,20 @@ impl PolicyStore {
                 }
                 let batch: Batch =
                     serde_json::from_str(line).map_err(|e| format!("event journal: {e}"))?;
-                next.state = self.engine.update(&next.state, &json!(batch.events))?;
+                let mut events = batch.events;
+                for event in &mut events {
+                    let object = event.as_object_mut().ok_or("event must be an object")?;
+                    let invalid = batch.invalidate
+                        || object
+                            .get("invalidate")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                    object.insert("invalidate".into(), json!(invalid));
+                    if let Some(reason) = &batch.invalidation_reason {
+                        object.insert("invalidation_reason".into(), json!(reason));
+                    }
+                }
+                next.state = self.engine.update(&next.state, &json!(events))?;
                 next.hunts = next.hunts.checked_add(1).ok_or("hunt overflow")?;
                 next.cursor += line.len() as u64;
             }
@@ -241,6 +271,28 @@ pub fn integer_weights(base: &[i32], values: &[f64]) -> Result<Vec<i32>, String>
         result[i] += 1;
     }
     Ok(result)
+}
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    #[test]
+    fn old_journal_defaults_to_valid_and_invalid_metadata_roundtrips() {
+        let old: Batch = serde_json::from_str(r#"{"events":[]}"#).unwrap();
+        assert!(!old.invalidate);
+        assert!(old.invalidation_reason.is_none());
+        let batch = Batch {
+            events: vec![],
+            invalidate: true,
+            invalidation_reason: Some("multiplayer_detected".into()),
+        };
+        let saved = serde_json::to_string(&batch).unwrap();
+        let reread: Batch = serde_json::from_str(&saved).unwrap();
+        assert!(reread.invalidate);
+        assert_eq!(
+            reread.invalidation_reason.as_deref(),
+            Some("multiplayer_detected")
+        );
+    }
 }
 #[cfg(all(test, feature = "game-fixtures"))]
 mod tests {

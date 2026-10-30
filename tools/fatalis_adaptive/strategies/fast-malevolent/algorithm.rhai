@@ -6,6 +6,7 @@ fn setting(params, key, fallback) {
 fn update(state, events, params) {
     if !state.contains("effects") { state.effects = #{}; }
     for event in events {
+        if event.contains("invalidate") && event.invalidate { continue; }
         let p = event.player_loss_fraction.to_float();
         let m = event.monster_loss_fraction.to_float();
         if p < 0.0 || m < 0.0 { continue; }

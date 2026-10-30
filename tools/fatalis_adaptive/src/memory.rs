@@ -184,6 +184,18 @@ pub fn resolve_module_chain(offsets: &[u64]) -> Option<u64> {
     }
     chain(platform::base()?, offsets)
 }
+/// Source-derived task party flag from radar/HunterPie. Zero means solo;
+/// positive values indicate multiplayer. Unknown is never interpreted as solo.
+pub fn read_multiplayer() -> Option<bool> {
+    let base = platform::base()?;
+    let value = chain(base + 0x051c_46b8, &[0x258, 0x10, 0x6574]).and_then(int)?;
+    match value {
+        0 => Some(false),
+        1..=4 => Some(true),
+        _ => None,
+    }
+}
+
 fn hp(object: u64) -> Option<(f64, f64)> {
     let max = float(object.checked_add(0x60)?)?;
     let current = float(object.checked_add(0x64)?)?;

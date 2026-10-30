@@ -6,6 +6,7 @@ fn number_or(params, key, fallback) {
 fn update(state, events, params) {
     if !state.contains("effects") { state.effects = #{}; }
     for event in events {
+        if event.contains("invalidate") && event.invalidate { continue; }
         let player = event.player_loss_fraction.to_float();
         let monster = event.monster_loss_fraction.to_float();
         // Match Learning::observe: reject negative damage, cap each observation at one.

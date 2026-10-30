@@ -1,4 +1,5 @@
 pub mod ai_document;
+pub mod batch_guard;
 pub use ai_document::AiDocument;
 pub mod compact_hook;
 pub mod config;

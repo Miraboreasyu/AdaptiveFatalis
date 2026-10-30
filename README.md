@@ -65,6 +65,12 @@ The challenging option with stronger, faster changes.
 
 Changes carry over to later hunts; this is not an instant difficulty switch during combat. Strategies use your recorded history when selected. You do not need to delete your saves or reset the mod when switching strategies.
 
+## Multiplayer
+
+The included strategies exclude newly recorded multiplayer data from learning once another player is detected. You do not need to change your configuration before joining friends. Your existing single-player history is kept.
+
+This protects learning data; it does **not** switch Fatalis back to its original behavior during multiplayer or guarantee multiplayer compatibility. Changes learned before multiplayer was detected are not undone. Third-party strategies may handle multiplayer data differently.
+
 ## Updating
 
 Close the game, back up your current mod folder, and merge the new release's `nativePC` folder into the game folder. Keep your existing `register` and `deployment` folders. Do not delete them while upgrading.

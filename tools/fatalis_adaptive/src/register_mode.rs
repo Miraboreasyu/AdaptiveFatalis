@@ -40,6 +40,7 @@ struct Session {
     tracker: RegisterTracker,
     compiled: crate::instrument::InstrumentedThk,
     compact: bool,
+    guard: crate::batch_guard::BatchGuard,
     scripted: Option<crate::policy_store::PolicyStore>,
 }
 impl Session {
@@ -117,6 +118,7 @@ impl Session {
             tracker,
             compiled,
             compact,
+            guard: crate::batch_guard::BatchGuard::default(),
             scripted,
         })
     }
@@ -142,7 +144,11 @@ impl Session {
             return Ok(0);
         }
         if let Some(store) = &mut self.scripted {
-            store.append(&self.baseline, &windows)?;
+            let reason = self.guard.reason();
+            store.append_with_invalidation(&self.baseline, &windows, reason)?;
+            if let Some(reason) = reason {
+                runtime::log(self.dir.parent().unwrap_or(&self.dir), &format!("batch invalidated: reason={reason} windows={}; bundled strategies skip this batch", windows.len()));
+            }
             match store.refresh(&self.baseline) {
                 Ok(document) => self.current = document,
                 Err(error) => {
@@ -256,6 +262,7 @@ pub fn run(
     let mut context_failures = 0u64;
     let mut context_logged = false;
     let mut first_pair_logged = false;
+    let mut last_party = None;
     while !stop.load(Ordering::Relaxed) {
         if watchdog.try_wait().map_err(|e| e.to_string())?.is_some() {
             return Err("watchdog lost; stop deployment and sampling".into());
@@ -268,7 +275,33 @@ pub fn run(
             handled = None;
         }
         let in_combat = s.quest_state == Some(2) && s.stage == Some(417);
+        let now_ms = started.elapsed().as_millis() as u64;
+        if !(in_combat && s.player_hp.is_some() && s.monster.is_some())
+            && session.guard.idle(now_ms)
+        {
+            session.settle()?; // preserve invalidation on the old batch before reset
+            session.guard.reset();
+            runtime::log(dir, "batch guard reset: 60s without valid combat updates");
+        }
         if in_combat {
+            let party = memory::read_multiplayer();
+            if last_party != Some(party) {
+                runtime::log(dir, &format!("party state: multiplayer={party:?} (source-derived; multiplayer flag is task-scoped candidate)"));
+                last_party = Some(party);
+            }
+            // MP is checked even when combat object reads fail. Only valid
+            // combat snapshots refresh the idle timer.
+            if (s.player_hp.is_some() && s.monster.is_some() || party == Some(true))
+                && session.guard.observe(party, now_ms)
+            {
+                runtime::log(
+                    dir,
+                    &format!(
+                        "batch guard latched: {}",
+                        session.guard.reason().unwrap_or("unknown")
+                    ),
+                );
+            }
             left_combat = None;
             if hunt_id != s.quest_id {
                 hunt_id = s.quest_id;
@@ -396,6 +429,7 @@ pub fn run(
                         &format!("register mode: quest ended; settled {settled} windows"),
                     );
                 }
+                session.guard.reset();
                 let changed = ensure_deployed(d, project, &session)?;
                 runtime::log(
                     dir,
