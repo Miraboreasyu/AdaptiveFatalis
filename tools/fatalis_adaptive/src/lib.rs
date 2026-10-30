@@ -1,5 +1,6 @@
 pub mod ai_document;
 pub use ai_document::AiDocument;
+pub mod compact_hook;
 pub mod config;
 pub mod deploy;
 pub mod geometry;

@@ -177,6 +177,30 @@ pub fn compile(
     table_ids: &[String],
     registers: Registers,
 ) -> Result<InstrumentedThk, String> {
+    compile_mode(document, table_ids, registers, false)
+}
+
+/// Experimental compact marker opcode. The runtime must install its handler before deployment.
+pub const COMPACT_MARKER_FUNCTION: i32 = 0x7f414446;
+pub const COMPACT_MARKER_COOKIE: i32 = 0x314d4641;
+
+pub fn compile_compact(
+    document: &crate::AiDocument,
+    table_ids: &[String],
+    registers: Registers,
+) -> Result<InstrumentedThk, String> {
+    if registers.slots() != [14, 15, 16, 17, 18, 19] {
+        return Err("compact marker requires fixed slots 14..19".into());
+    }
+    compile_mode(document, table_ids, registers, true)
+}
+
+fn compile_mode(
+    document: &crate::AiDocument,
+    table_ids: &[String],
+    registers: Registers,
+    compact: bool,
+) -> Result<InstrumentedThk, String> {
     registers.validate()?;
     if table_ids.is_empty() {
         return Err("explicit nonempty target table list required".into());
@@ -236,25 +260,34 @@ pub fn compile(
             let s = &parsed.nodes[table.node].segments[branch.segment];
             let wrapper_node = nodes.len();
             let mut body = Vec::new();
-            let code_digits = digits(table_code);
-            let option_digits = two_digits(exit);
-            for (slot, digit) in slots
-                .iter()
-                .zip(code_digits.iter().chain(option_digits.iter()).copied())
-            {
-                let mut clear = segment();
-                put(&mut clear, 8, unary(*slot));
-                put(&mut clear, 12, 1);
-                body.push(clear.to_vec());
-                let mut one = segment();
-                put(&mut one, 8, unary(*slot));
-                let one = one.to_vec();
-                for _ in 0..digit {
-                    body.push(one.clone());
+            if compact {
+                let mut marker = segment();
+                put(&mut marker, 8, COMPACT_MARKER_FUNCTION);
+                put(&mut marker, 12, id);
+                put(&mut marker, 32, COMPACT_MARKER_COOKIE);
+                body.push(marker.to_vec());
+            } else {
+                let code_digits = digits(table_code);
+                let option_digits = two_digits(exit);
+                for (slot, digit) in slots
+                    .iter()
+                    .zip(code_digits.iter().chain(option_digits.iter()).copied())
+                {
+                    let mut clear = segment();
+                    put(&mut clear, 8, unary(*slot));
+                    put(&mut clear, 12, 1);
+                    body.push(clear.to_vec());
+                    let mut one = segment();
+                    put(&mut one, 8, unary(*slot));
+                    let one = one.to_vec();
+                    for _ in 0..digit {
+                        body.push(one.clone());
+                    }
                 }
+                let mut increment = segment();
+                put(&mut increment, 8, unary(slots[5]));
+                body.push(increment.to_vec());
             }
-            let mut increment = segment();
-            put(&mut increment, 8, unary(slots[5]));
             let mut call = segment();
             put(&mut call, 40, s.external_thk);
             put(&mut call, 44, s.external_id);
@@ -267,12 +300,7 @@ pub fn compile(
                 36,
                 i32::try_from(wrapper_node + 10000).map_err(|_| "node end overflow")?,
             );
-            body.extend([
-                increment.to_vec(),
-                call.to_vec(),
-                ret.to_vec(),
-                end.to_vec(),
-            ]);
+            body.extend([call.to_vec(), ret.to_vec(), end.to_vec()]);
             nodes.push(body);
             // Local wrappers are addressed by index, never by node hash.
             ids.push(0);
@@ -321,7 +349,11 @@ pub fn compile(
             output_sha256: crate::thk::sha256(&out),
             registers,
             markers,
-            safety: "Explicit physical slots, NOT allocation. main/Global are audited, but other loaded THKs and engine use of slots 14..19 are not. The derived cThinkEm chain (monster+0x12278 -> AIData+0xAA8 -> cThinkEm+0x640) is source-derived from the rebuilt executable, not live-verified on the installed build. Decimal digits are written before counter++; a stable counter implies the digit writes completed, but multi-register publication is not atomic.".into(),
+            safety: if compact {
+                "EXPERIMENTAL compact marker opcode; requires installed matching handler before resource load. Handler and sampler serialize publication with a host lock. No guarantee for other plugins writing these registers. Original native mode remains fallback.".into()
+            } else {
+                "Explicit physical slots, NOT allocation. main/Global are audited, but other loaded THKs and engine use of slots 14..19 are not. The derived cThinkEm chain (monster+0x12278 -> AIData+0xAA8 -> cThinkEm+0x640) is source-derived from the rebuilt executable, not live-verified on the installed build. Decimal digits are written before counter++; a stable counter does not rule out an in-progress publication; multi-register publication is not atomic.".into()
+            },
         },
         bytes: out,
     })

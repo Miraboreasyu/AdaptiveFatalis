@@ -30,6 +30,9 @@ serde_json = "1"
 rhai = { version = "1", features = ["serde"] }
 sha2 = "0.10"
 
+[target.'cfg(windows)'.dependencies]
+minhook = "0.9"
+
 [profile.release]
 panic = "unwind"
 strip = "debuginfo"

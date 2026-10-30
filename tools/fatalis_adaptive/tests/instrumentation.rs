@@ -7,6 +7,44 @@ use fatalis_adaptive::{
 const MAIN: &[u8] = include_bytes!("../../../research/fatalis_thk/em013_00.thk");
 const GLOBAL: &[u8] = include_bytes!("../../../research/fatalis_thk/em013_55.thk");
 
+#[test]
+fn compact_all_arms_preserve_ids_and_calls() {
+    use fatalis_adaptive::instrument::{
+        compile_compact, COMPACT_MARKER_COOKIE, COMPACT_MARKER_FUNCTION,
+    };
+    let d = AiDocument::parse(MAIN, GLOBAL).unwrap();
+    let targets = instrumentable_tables(&d)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect::<Vec<_>>();
+    let native = compile(&d, &targets, registers()).unwrap();
+    let compact = compile_compact(&d, &targets, registers()).unwrap();
+    assert_eq!(compact.manifest.markers.len(), 3282);
+    assert!(compact.bytes.len() < 2_800_000);
+    let parsed = Thk::parse(compact.bytes.clone()).unwrap();
+    for (a, b) in native
+        .manifest
+        .markers
+        .iter()
+        .zip(&compact.manifest.markers)
+    {
+        assert_eq!(
+            (a.id, &a.table_id, a.exit_index, a.original_global_id),
+            (b.id, &b.table_id, b.exit_index, b.original_global_id)
+        );
+        let body = &parsed.nodes[b.wrapper_node].segments;
+        assert_eq!(body.len(), 4);
+        assert_eq!(body[0].function, COMPACT_MARKER_FUNCTION);
+        assert_eq!(body[0].p1, b.id);
+        assert_eq!(body[0].p2, COMPACT_MARKER_COOKIE);
+        assert_eq!(body[1].external_thk, 55);
+        assert_eq!(body[1].external_id, b.original_global_id);
+        assert_eq!(body[2].flow, 8);
+        assert_eq!(body[3].marker, 1);
+    }
+}
+
 fn registers() -> Registers {
     Registers {
         table_code: [14, 15, 16],

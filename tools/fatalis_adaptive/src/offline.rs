@@ -44,7 +44,13 @@ fn run() -> Result<(), String> {
     let command = a.get(1).map(String::as_str).unwrap_or("help");
     if !matches!(
         command,
-        "query" | "edit" | "template" | "tables" | "instrument" | "policy-replay"
+        "query"
+            | "edit"
+            | "template"
+            | "tables"
+            | "instrument"
+            | "instrument-compact"
+            | "policy-replay"
     ) {
         println!("Offline Fatalis AI model (no game access)\n  query ORIGINAL_MAIN ORIGINAL_GLOBAL DISTANCE ANGLE_CW [ENTRY_NODE=0] [CURRENT_MAIN]\n  template ORIGINAL_MAIN ORIGINAL_GLOBAL [CURRENT_MAIN]\n  edit ORIGINAL_MAIN ORIGINAL_GLOBAL CURRENT_MAIN EDIT_JSON NEW_OUTPUT\n  tables ORIGINAL_MAIN ORIGINAL_GLOBAL [TABLE_ID...]\n  instrument ORIGINAL_MAIN ORIGINAL_GLOBAL TABLE_CODE_SLOTS OPTION_SLOTS COUNTER_SLOT OUT_THK OUT_MANIFEST [TABLE_ID...]\nQuery emits independent tables with direct Global targets and path constraints.\nTemplate emits hash-pinned current weights; retain only the tables you want to edit.\nEdit never overwrites existing output and reports every changed byte.\nTables lists instrumentable leaf tables and positive arms. Empty table lists in\nInstrument mean all discovered tables; TABLE_CODE_SLOTS is \"hundreds,tens,units\"\nand OPTION_SLOTS is \"tens,units\".\nInstrument writes a structurally instrumented main THK plus its ID manifest;\nslots are physical and must still be audited/proven against the running build.");
         println!(
@@ -205,7 +211,7 @@ fn run() -> Result<(), String> {
                 .map_err(|e| e.to_string())?;
             print_json(&report)?;
         }
-        "instrument" => {
+        "instrument" | "instrument-compact" => {
             let table_code_slots = parse_slots::<3>(arg(&a, 4)?)?;
             let option_slots = parse_slots::<2>(arg(&a, 5)?)?;
             let counter_slot: u8 = arg(&a, 6)?.parse().map_err(|_| "invalid counter slot")?;
@@ -223,14 +229,16 @@ fn run() -> Result<(), String> {
                     .map(|(table, _)| table)
                     .collect()
             };
-            let compiled = document.to_instrumented_thk(
-                &tables,
-                Registers {
-                    table_code: table_code_slots,
-                    option: option_slots,
-                    counter: counter_slot,
-                },
-            )?;
+            let registers = Registers {
+                table_code: table_code_slots,
+                option: option_slots,
+                counter: counter_slot,
+            };
+            let compiled = if a[1] == "instrument-compact" {
+                fatalis_adaptive::instrument::compile_compact(&document, &tables, registers)?
+            } else {
+                document.to_instrumented_thk(&tables, registers)?
+            };
             fs::write(out, &compiled.bytes).map_err(|e| e.to_string())?;
             fs::write(
                 manifest,

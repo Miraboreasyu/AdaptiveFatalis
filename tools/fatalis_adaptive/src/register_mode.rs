@@ -39,6 +39,7 @@ struct Session {
     current: AiDocument,
     tracker: RegisterTracker,
     compiled: crate::instrument::InstrumentedThk,
+    compact: bool,
     scripted: Option<crate::policy_store::PolicyStore>,
 }
 impl Session {
@@ -80,7 +81,29 @@ impl Session {
             return Err("register target discovery found no instrumentable tables".into());
         }
         let registers = cfg.registers();
-        let compiled = current.to_instrumented_thk(&targets, registers)?;
+        // Experimental opt-in is a separate file, not part of the strategy selection.
+        let requested = dir
+            .parent()
+            .is_some_and(|p| p.join("compact-marker.enabled").is_file());
+        let compact = requested
+            && match crate::compact_hook::try_install() {
+                Ok(()) => {
+                    runtime::log(dir.parent().unwrap_or(dir), "compact marker hook enabled");
+                    true
+                }
+                Err(e) => {
+                    runtime::log(
+                        dir.parent().unwrap_or(dir),
+                        &format!("compact marker unavailable; using native fallback: {e}"),
+                    );
+                    false
+                }
+            };
+        let compiled = if compact {
+            crate::instrument::compile_compact(&current, &targets, registers)?
+        } else {
+            current.to_instrumented_thk(&targets, registers)?
+        };
         let tracker = RegisterTracker::new(compiled.manifest.option_map());
         tracker.validate_options(&current)?;
         storage::json(&dir.join(MANIFEST), &compiled.manifest)?;
@@ -93,6 +116,7 @@ impl Session {
             current,
             tracker,
             compiled,
+            compact,
             scripted,
         })
     }
@@ -100,9 +124,12 @@ impl Session {
         storage::save(&self.dir.join(MODEL), &self.current.to_thk()?)
     }
     fn recompile(&mut self) -> Result<(), String> {
-        self.compiled = self
-            .current
-            .to_instrumented_thk(&self.targets, self.registers)?;
+        self.compiled = if self.compact {
+            crate::instrument::compile_compact(&self.current, &self.targets, self.registers)?
+        } else {
+            self.current
+                .to_instrumented_thk(&self.targets, self.registers)?
+        };
         storage::json(&self.dir.join(MANIFEST), &self.compiled.manifest)?;
         Ok(())
     }
@@ -278,8 +305,14 @@ pub fn run(
                     context_failures += 1;
                 }
                 let pair = resolved.as_deref().and_then(|addresses| {
-                    let code: &[u64; 5] = addresses[..5].try_into().ok()?;
-                    memory::read_register_code(code, addresses[5])
+                    if session.compact {
+                        // Slots are fixed in compact mode; resolve from the same validated context.
+                        let context = addresses[0].checked_sub(0x640 + 14 * 4)?;
+                        crate::compact_hook::read_code(context)
+                    } else {
+                        let code: &[u64; 5] = addresses[..5].try_into().ok()?;
+                        memory::read_register_code(code, addresses[5])
+                    }
                 });
                 match pair {
                     Some((counter, option_id)) => {
