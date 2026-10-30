@@ -1,0 +1,6 @@
+{
+  "direction": -1.0,
+  "strength": 2.0,
+  "prior_samples": 8.0,
+  "exploration": 0.25
+}

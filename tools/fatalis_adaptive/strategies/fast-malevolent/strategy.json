@@ -1,0 +1,6 @@
+{
+  "id": "fast-malevolent",
+  "state_version": 1,
+  "script": "algorithm.rhai",
+  "params": "params.json"
+}
