@@ -186,6 +186,38 @@ pub fn resolve_module_chain(offsets: &[u64]) -> Option<u64> {
 }
 /// Source-derived task party flag from radar/HunterPie. Zero means solo;
 /// positive values indicate multiplayer. Unknown is never interpreted as solo.
+pub fn read_auxiliary(monster: Option<u64>) -> Option<crate::observations::AuxiliarySnapshot> {
+    let base = platform::base()?;
+    let quest = ptr(base + 0x0500_ed30)?;
+    let deaths = int(quest.checked_add(0x17374)?).filter(|n| (0..=100).contains(n));
+    let max_deaths = int(quest.checked_add(0x17370)?).filter(|n| (1..=100).contains(n));
+    let part_table_token = monster.and_then(|m| ptr(m.checked_add(0x1d058)?));
+    let part_counts = part_table_token.and_then(|parts| {
+        let mut counts = [0; 11];
+        for (i, count) in counts.iter_mut().enumerate() {
+            let at = parts.checked_add(0x40 + i as u64 * 0x1f8)?;
+            let max = float(at + 0xc)?;
+            let health = float(at + 0x10)?;
+            *count = int(at + 0x18)?;
+            if !(0.0..=1e9).contains(&max)
+                || !(-1e6..=1e9).contains(&health)
+                || !(0..=10000).contains(count)
+            {
+                return None;
+            }
+        }
+        Some(counts)
+    });
+    Some(crate::observations::AuxiliarySnapshot {
+        quest_token: quest,
+        deaths,
+        max_deaths,
+        monster_token: monster,
+        part_table_token,
+        part_counts,
+    })
+}
+
 pub fn read_multiplayer() -> Option<bool> {
     let base = platform::base()?;
     let value = chain(base + 0x051c_46b8, &[0x258, 0x10, 0x6574]).and_then(int)?;

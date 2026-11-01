@@ -51,6 +51,11 @@ pub struct CompletedRegisterWindow {
     /// Healing never subtracts an earlier hit. Can exceed one before Learning's cap.
     pub player_loss_fraction: f64,
     pub monster_loss_fraction: f64,
+    pub end_reason: &'static str,
+    pub part_threshold: bool,
+    pub player_hp_reached_zero: bool,
+    /// Unknown unless backed by a separately verified observation source.
+    pub player_fainted: Option<bool>,
 }
 
 /// Structured, explicit diagnostics; callers can format/persist these as desired.
@@ -108,6 +113,7 @@ struct ActiveWindow {
     table_id: String,
     exit_index: usize,
     damage: DamageWindow,
+    player_hp_reached_zero: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -200,6 +206,7 @@ impl RegisterTracker {
                         self.preserve_boundary("maximum_hp_changed", &s, &mut logs);
                         logs.push(RegisterLog::MaximumHpChanged);
                     } else {
+                        w.player_hp_reached_zero |= p.player_hp > 0.0 && s.player_hp == 0.0;
                         w.damage.tick(s.player_hp, s.monster_hp);
                         w.end = s.timestamp;
                     }
@@ -222,6 +229,7 @@ impl RegisterTracker {
                     self.preserve_boundary("maximum_hp_changed", &s, &mut logs);
                     logs.push(RegisterLog::MaximumHpChanged);
                 } else {
+                    w.player_hp_reached_zero |= p.player_hp > 0.0 && s.player_hp == 0.0;
                     w.damage.tick(s.player_hp, s.monster_hp);
                     w.end = s.timestamp;
                     self.close(&mut logs);
@@ -241,6 +249,7 @@ impl RegisterTracker {
                     table_id: table_id.clone(),
                     exit_index: *exit_index,
                     damage: DamageWindow::new(s.player_hp, s.monster_hp),
+                    player_hp_reached_zero: false,
                 });
                 logs.push(RegisterLog::Opened {
                     counter: s.counter,
@@ -260,7 +269,7 @@ impl RegisterTracker {
 
     fn preserve_boundary(
         &mut self,
-        reason: &str,
+        reason: &'static str,
         next: &RegisterSnapshot,
         logs: &mut Vec<RegisterLog>,
     ) {
@@ -272,10 +281,13 @@ impl RegisterTracker {
                 w.damage.monster_loss / w.start.monster_max_hp, w.start, w.damage, next
             ) });
         }
-        self.close(logs);
+        self.close_reason(logs, reason, false);
     }
 
     fn close(&mut self, logs: &mut Vec<RegisterLog>) {
+        self.close_reason(logs, "next_marker", false);
+    }
+    fn close_reason(&mut self, logs: &mut Vec<RegisterLog>, reason: &'static str, flinch: bool) {
         if let Some(w) = self.active.take() {
             self.completed.push(CompletedRegisterWindow {
                 monster_token: w.start.monster_token,
@@ -287,6 +299,10 @@ impl RegisterTracker {
                 ended_at: w.end,
                 player_loss_fraction: w.damage.player_loss / w.start.player_max_hp,
                 monster_loss_fraction: w.damage.monster_loss / w.start.monster_max_hp,
+                end_reason: reason,
+                part_threshold: flinch,
+                player_hp_reached_zero: w.player_hp_reached_zero,
+                player_fainted: None,
             });
             logs.push(RegisterLog::Completed {
                 counter: w.start.counter,
@@ -299,7 +315,15 @@ impl RegisterTracker {
     /// Repeated calls are harmless. A new hunt should use a fresh tracker.
     pub fn finish(&mut self) -> Vec<RegisterLog> {
         let mut logs = Vec::new();
-        self.close(&mut logs);
+        self.close_reason(&mut logs, "observation_ended", false);
+        logs
+    }
+
+    /// Caller supplies a verified part-flinch event AFTER pushing the coherent
+    /// HP snapshot. No same-counter reopening; post-flinch damage is excluded.
+    pub fn part_threshold(&mut self) -> Vec<RegisterLog> {
+        let mut logs = Vec::new();
+        self.close_reason(&mut logs, "part_threshold", true);
         logs
     }
 }
@@ -436,6 +460,41 @@ mod tests {
         assert!((a - b).abs() < 1e-10, "{a} != {b}");
     }
 
+    #[test]
+    fn part_threshold_closes_and_excludes_followup_until_next_marker() {
+        let mut t = tracker();
+        t.push(Some(s(1, 7, 100.0, 1000.0)));
+        let mut hit = s(1, 7, 80.0, 900.0);
+        hit.timestamp = 150;
+        t.push(Some(hit));
+        t.part_threshold();
+        let mut followup = s(1, 7, 60.0, 500.0);
+        followup.timestamp = 170;
+        t.push(Some(followup));
+        t.push(Some(s(2, 8, 60.0, 500.0)));
+        assert_eq!(t.completed().len(), 1);
+        assert_eq!(t.completed()[0].end_reason, "part_threshold");
+        assert!(t.completed()[0].part_threshold);
+        assert_eq!(t.completed()[0].ended_at - t.completed()[0].started_at, 50);
+        near(t.completed()[0].monster_loss_fraction, 0.1);
+    }
+
+    #[test]
+    fn zero_hp_flag_survives_respawn_boundary_and_is_not_invented() {
+        let mut t = tracker();
+        t.push(Some(s(1, 7, 100.0, 1000.0)));
+        t.push(Some(s(1, 7, 0.0, 1000.0)));
+        let mut respawn = s(1, 7, 150.0, 1000.0);
+        respawn.player_max_hp = 150.0;
+        t.push(Some(respawn));
+        assert!(t.completed()[0].player_hp_reached_zero);
+        let mut t = tracker();
+        t.push(Some(s(1, 7, 100.0, 1000.0)));
+        t.push(None);
+        t.push(Some(s(2, 8, 0.0, 1000.0)));
+        t.finish();
+        assert!(!t.completed()[0].player_hp_reached_zero);
+    }
     #[test]
     fn same_id_new_counter_settles_and_healing_does_not_erase_hits() {
         let mut t = tracker();

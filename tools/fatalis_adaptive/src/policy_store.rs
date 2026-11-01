@@ -24,9 +24,36 @@ struct Checkpoint {
 struct Batch {
     events: Vec<Value>,
     #[serde(default)]
+    observations: Vec<Value>,
+    #[serde(default)]
     invalidate: bool,
     #[serde(default)]
     invalidation_reason: Option<String>,
+}
+impl Batch {
+    fn strategy_events(self) -> Result<Vec<Value>, String> {
+        let mut events = self.events;
+        events.extend(self.observations);
+        events.sort_by_key(|e| {
+            e.get("timestamp_ms")
+                .or_else(|| e.get("ended_at"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+        });
+        for event in &mut events {
+            let object = event.as_object_mut().ok_or("event must be an object")?;
+            let invalid = self.invalidate
+                || object
+                    .get("invalidate")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            object.insert("invalidate".into(), json!(invalid));
+            if let Some(reason) = &self.invalidation_reason {
+                object.insert("invalidation_reason".into(), json!(reason));
+            }
+        }
+        Ok(events)
+    }
 }
 pub struct PolicyStore {
     engine: ScriptPolicy,
@@ -106,6 +133,15 @@ impl PolicyStore {
         windows: &[CompletedRegisterWindow],
         reason: Option<&str>,
     ) -> Result<(), String> {
+        self.append_observed(baseline, windows, &[], reason)
+    }
+    pub fn append_observed(
+        &self,
+        baseline: &AiDocument,
+        windows: &[CompletedRegisterWindow],
+        observations: &[Value],
+        reason: Option<&str>,
+    ) -> Result<(), String> {
         let mut events = Vec::with_capacity(windows.len());
         for w in windows {
             let table = baseline.table(&w.table_id).ok_or("unknown event table")?;
@@ -120,13 +156,15 @@ impl PolicyStore {
             {
                 return Err("invalid event damage".into());
             }
-            events.push(json!({"branch_id":branch.id,"table_id":w.table_id,"exit_index":w.exit_index,
+            events.push(json!({"kind":"option_window","observation_schema":1,"player_hp_reached_zero":w.player_hp_reached_zero,"window_truncated":w.end_reason!="next_marker","branch_id":branch.id,"table_id":w.table_id,"exit_index":w.exit_index,
                 "player_loss_fraction":w.player_loss_fraction,"monster_loss_fraction":w.monster_loss_fraction,
                 "started_at":w.started_at,"ended_at":w.ended_at,"counter":w.counter,
-                "player_fainted":null}));
+                "player_fainted":w.player_fainted,"duration_ms":w.ended_at.saturating_sub(w.started_at),
+                "end_reason":w.end_reason,"part_threshold":w.part_threshold}));
         }
         let mut bytes = serde_json::to_vec(&Batch {
             events,
+            observations: observations.to_vec(),
             invalidate: reason.is_some(),
             invalidation_reason: reason.map(str::to_owned),
         })
@@ -164,19 +202,7 @@ impl PolicyStore {
                 }
                 let batch: Batch =
                     serde_json::from_str(line).map_err(|e| format!("event journal: {e}"))?;
-                let mut events = batch.events;
-                for event in &mut events {
-                    let object = event.as_object_mut().ok_or("event must be an object")?;
-                    let invalid = batch.invalidate
-                        || object
-                            .get("invalidate")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false);
-                    object.insert("invalidate".into(), json!(invalid));
-                    if let Some(reason) = &batch.invalidation_reason {
-                        object.insert("invalidation_reason".into(), json!(reason));
-                    }
-                }
+                let events = batch.strategy_events()?;
                 next.state = self.engine.update(&next.state, &json!(events))?;
                 next.hunts = next.hunts.checked_add(1).ok_or("hunt overflow")?;
                 next.cursor += line.len() as u64;
@@ -276,12 +302,37 @@ pub fn integer_weights(base: &[i32], values: &[f64]) -> Result<Vec<i32>, String>
 mod batch_tests {
     use super::*;
     #[test]
+    fn facts_sorted_and_invalidated_without_duplicate_replay() {
+        let batch = Batch {
+            events: vec![json!({"kind":"option_window","ended_at":20})],
+            observations: vec![
+                json!({"kind":"player_hp_zero","timestamp_ms":10}),
+                json!({"kind":"quest_deaths","timestamp_ms":20}),
+            ],
+            invalidate: true,
+            invalidation_reason: Some("multiplayer_detected".into()),
+        };
+        let events = batch.strategy_events().unwrap();
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["kind"], "player_hp_zero");
+        assert_eq!(events[1]["kind"], "option_window");
+        assert_eq!(events[2]["kind"], "quest_deaths");
+        assert!(
+            events
+                .iter()
+                .all(|e| e["invalidate"] == true
+                    && e["invalidation_reason"] == "multiplayer_detected")
+        );
+    }
+    #[test]
     fn old_journal_defaults_to_valid_and_invalid_metadata_roundtrips() {
         let old: Batch = serde_json::from_str(r#"{"events":[]}"#).unwrap();
         assert!(!old.invalidate);
+        assert!(old.observations.is_empty());
         assert!(old.invalidation_reason.is_none());
         let batch = Batch {
             events: vec![],
+            observations: vec![],
             invalidate: true,
             invalidation_reason: Some("multiplayer_detected".into()),
         };
@@ -339,6 +390,10 @@ mod tests {
             ended_at: 1,
             player_loss_fraction: 0.9,
             monster_loss_fraction: 0.0,
+            end_reason: "next_marker",
+            part_threshold: false,
+            player_hp_reached_zero: false,
+            player_fainted: None,
         };
         store
             .append(&baseline, std::slice::from_ref(&window))

@@ -9,6 +9,7 @@ pub mod instrument;
 pub mod learning;
 pub mod memory;
 pub mod model;
+pub mod observations;
 #[cfg(windows)]
 mod plugin;
 pub mod policy_store;

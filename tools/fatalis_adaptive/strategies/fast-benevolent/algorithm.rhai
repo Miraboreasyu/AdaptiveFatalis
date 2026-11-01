@@ -6,6 +6,7 @@ fn setting(params, key, fallback) {
 fn update(state, events, params) {
     if !state.contains("effects") { state.effects = #{}; }
     for event in events {
+        if event.contains("kind") && event.kind != "option_window" { continue; }
         if event.contains("invalidate") && event.invalidate { continue; }
         let p = event.player_loss_fraction.to_float();
         let m = event.monster_loss_fraction.to_float();
@@ -14,6 +15,8 @@ fn update(state, events, params) {
         let e = if state.effects.contains(key) { state.effects[key] }
             else { #{samples:0.0, player_loss:0.0, monster_loss:0.0} };
         e.samples += 1.0;
+        if !e.contains("zero_hp_count") { e.zero_hp_count = 0.0; }
+        if event.contains("player_hp_reached_zero") && event.player_hp_reached_zero { e.zero_hp_count += 1.0; }
         e.player_loss += p.min(1.0);
         e.monster_loss += m.min(1.0);
         state.effects[key] = e;
@@ -29,13 +32,16 @@ fn weights(state, table, params) {
         || prior <= 0.0 || exploration < 0.05 || exploration > 1.0 {
         throw "invalid fast learning parameters";
     }
+    let zero_hp_bonus = setting(params, "zero_hp_bonus", 1.0);
+    if zero_hp_bonus < 0.0 || zero_hp_bonus > 10.0 { throw "invalid zero_hp_bonus (0..10)"; }
     let effects = if state.contains("effects") { state.effects } else { #{} };
     let values = []; let total = 0.0;
     for b in table.branches {
         let score = 0.0;
         if effects.contains(b.id) {
             let e = effects[b.id];
-            score = (e.player_loss-e.monster_loss)/(e.samples+prior);
+            let zeros = if e.contains("zero_hp_count") { e.zero_hp_count } else { 0.0 };
+            score = (e.player_loss-e.monster_loss+zero_hp_bonus*zeros)/(e.samples+prior);
         }
         let v = b.base_weight.to_float() * (direction*strength*score).max(-20.0).min(20.0).exp();
         values.push(v); total += v;

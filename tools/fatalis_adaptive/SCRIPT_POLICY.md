@@ -29,7 +29,7 @@ fn update(state, events, params) { /* return new object state */ }
 fn weights(state, table, params) { /* return float array */ }
 ```
 
-update 按一次结算批次调用。events 是数组，每项包括 branch_id、table_id、exit_index、player_loss_fraction、monster_loss_fraction、started_at、ended_at、counter 和 player_fainted（当前未知，null）。损失是窗口内负 HP 差累加再按开窗最大 HP 归一化，可能超过1；观测层不截断。默认算法自行截断1以兼容旧行为。
+update 按一次结算批次调用。events 现在同时提供 option_window、player_hp_zero、quest_deaths、part_threshold，详见 OBSERVATIONS.md 的观测内核 v1 契约。新脚本必须先判断 kind；旧窗口没有 kind 时仍按窗口处理。只有 option_window 包含 branch_id、table_id、exit_index、player_loss_fraction、monster_loss_fraction、started_at、ended_at、counter 和 player_fainted（未知，null）。损失是窗口内负 HP 差累加再按开窗最大 HP 归一化，可能超过1；观测层不截断。默认算法自行截断1以兼容旧行为。
 
 当前事件接口使用归一化损失，不提供精确命中来源或原始HP；窗口可能覆盖后续未插桩动作，不能把它当命中次数或单招绝对因果证明。猫车检测尚未实现，不能通过未知字段假造击杀奖励。
 

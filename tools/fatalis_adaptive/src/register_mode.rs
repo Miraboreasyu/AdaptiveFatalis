@@ -40,6 +40,7 @@ struct Session {
     tracker: RegisterTracker,
     compiled: crate::instrument::InstrumentedThk,
     compact: bool,
+    observations: Vec<serde_json::Value>,
     guard: crate::batch_guard::BatchGuard,
     scripted: Option<crate::policy_store::PolicyStore>,
 }
@@ -118,6 +119,7 @@ impl Session {
             tracker,
             compiled,
             compact,
+            observations: Vec::new(),
             guard: crate::batch_guard::BatchGuard::default(),
             scripted,
         })
@@ -140,12 +142,13 @@ impl Session {
     fn settle(&mut self) -> Result<usize, String> {
         self.tracker.finish();
         let windows = self.tracker.drain_completed();
-        if windows.is_empty() {
+        if windows.is_empty() && self.observations.is_empty() {
             return Ok(0);
         }
         if let Some(store) = &mut self.scripted {
             let reason = self.guard.reason();
-            store.append_with_invalidation(&self.baseline, &windows, reason)?;
+            store.append_observed(&self.baseline, &windows, &self.observations, reason)?;
+            self.observations.clear();
             if let Some(reason) = reason {
                 runtime::log(self.dir.parent().unwrap_or(&self.dir), &format!("batch invalidated: reason={reason} windows={}; bundled strategies skip this batch", windows.len()));
             }
@@ -263,6 +266,10 @@ pub fn run(
     let mut context_logged = false;
     let mut first_pair_logged = false;
     let mut last_party = None;
+    let mut observer = crate::observations::CounterObserver::default();
+    let mut auxiliary_key = None;
+    let mut auxiliary_available = None;
+    let mut hp_observer = crate::observations::HpObserver::default();
     while !stop.load(Ordering::Relaxed) {
         if watchdog.try_wait().map_err(|e| e.to_string())?.is_some() {
             return Err("watchdog lost; stop deployment and sampling".into());
@@ -276,6 +283,33 @@ pub fn run(
         }
         let in_combat = s.quest_state == Some(2) && s.stage == Some(417);
         let now_ms = started.elapsed().as_millis() as u64;
+        if auxiliary_key != Some(key) {
+            observer.reset();
+            auxiliary_key = Some(key);
+        }
+        let auxiliary = if in_combat {
+            memory::read_auxiliary(s.monster.as_ref().map(|m| m.addr))
+        } else {
+            None
+        };
+        let availability = auxiliary
+            .as_ref()
+            .map(|a| (a.deaths.is_some(), a.part_counts.is_some()));
+        if in_combat && auxiliary_available != Some(availability) {
+            runtime::log(dir,&format!("auxiliary observations available: {availability:?}; quest death counter and part thresholds are source-derived, not verified local faint/interruption"));
+            auxiliary_available = Some(availability);
+        }
+        let auxiliary_events = match auxiliary.as_ref() {
+            Some(a) => observer.push(a.clone()),
+            None => {
+                observer.reset();
+                crate::observations::CounterEvents::default()
+            }
+        };
+        let hp_zero = hp_observer.push(
+            auxiliary.as_ref().map(|a| a.quest_token).unwrap_or(0),
+            if in_combat { s.player_hp } else { None },
+        );
         if !(in_combat && s.player_hp.is_some() && s.monster.is_some())
             && session.guard.idle(now_ms)
         {
@@ -360,7 +394,7 @@ pub fn run(
                         }
                         let timestamp =
                             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        let logs = session.tracker.push(Some(RegisterSnapshot {
+                        let mut logs = session.tracker.push(Some(RegisterSnapshot {
                             monster_token: m.addr,
                             counter,
                             option_id,
@@ -370,6 +404,14 @@ pub fn run(
                             monster_max_hp: m.hp.0,
                             timestamp,
                         }));
+                        if !auxiliary_events.parts.is_empty() {
+                            // The first prototype deliberately closes at a threshold,
+                            // not a claimed stagger. If a marker also changed this poll,
+                            // keep normal marker ordering and do not close the new option.
+                            if !logs.iter().any(|l| matches!(l, RegisterLog::Opened { .. })) {
+                                logs.extend(session.tracker.part_threshold());
+                            }
+                        }
                         for log in &logs {
                             match log {
                                 RegisterLog::Opened { .. } => events += 1,
@@ -416,6 +458,32 @@ pub fn run(
                     dir,
                     &format!("register mode: combat data ended; settled {settled} windows"),
                 );
+            }
+        }
+        if hp_zero || auxiliary_events.deaths > 0 || !auxiliary_events.parts.is_empty() {
+            active = true;
+            if hp_zero {
+                session.observations.push(serde_json::json!({"kind":"player_hp_zero","observation_schema":1,"timestamp_ms":now_ms,"quest_id":s.quest_id,"player_hp_reached_zero":true,"attribution":"unassigned; option_window flag only if coherently observed"}));
+            }
+            if auxiliary_events.deaths > 0 {
+                session.observations.push(serde_json::json!({"kind":"quest_deaths","observation_schema":1,"timestamp_ms":now_ms,"quest_id":s.quest_id,"quest_deaths_delta":auxiliary_events.deaths,"snapshot":auxiliary,"attribution":"unassigned"}));
+            }
+            for (slot, delta) in &auxiliary_events.parts {
+                session.observations.push(serde_json::json!({"kind":"part_threshold","observation_schema":1,"timestamp_ms":now_ms,"quest_id":s.quest_id,"part_slot":slot,"delta":delta,"attribution":"unassigned"}));
+            }
+            let record = serde_json::json!({"player_hp_reached_zero":hp_zero,"timestamp_ms":now_ms,"quest_id":s.quest_id,
+                "snapshot":auxiliary,"part_counter_increases":auxiliary_events.parts,
+                "quest_deaths_increase":auxiliary_events.deaths,
+                "attribution":"unassigned; quest-wide death count, threshold is not confirmed interruption"});
+            runtime::log(dir, &format!("auxiliary event: {record}"));
+            use std::io::Write;
+            let result = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("register").join("observations.jsonl"))
+                .and_then(|mut f| writeln!(f, "{record}"));
+            if let Err(e) = result {
+                runtime::log(dir, &format!("auxiliary event journal failed: {e}"));
             }
         }
         if stable_since.elapsed() >= Duration::from_millis(config.stable_ms) && handled != Some(key)

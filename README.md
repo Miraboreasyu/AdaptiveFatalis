@@ -63,6 +63,8 @@ Gradually favors moves that have been more effective against the player.
 
 The challenging option with stronger, faster changes.
 
+The included adaptive strategies respond more strongly to moves whose observed window brings your HP to zero. Challenging strategies favor them more; helpful strategies avoid them more. This does not guarantee recognition of every faint.
+
 Changes carry over to later hunts; this is not an instant difficulty switch during combat. Strategies use your recorded history when selected. You do not need to delete your saves or reset the mod when switching strategies.
 
 ## Multiplayer

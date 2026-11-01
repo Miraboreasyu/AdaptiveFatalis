@@ -2,5 +2,6 @@
   "direction": -1.0,
   "strength": 2.0,
   "prior_samples": 8.0,
-  "exploration": 0.25
+  "exploration": 0.25,
+  "zero_hp_bonus": 1.0
 }
