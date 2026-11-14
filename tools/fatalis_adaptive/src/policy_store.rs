@@ -156,11 +156,38 @@ impl PolicyStore {
             {
                 return Err("invalid event damage".into());
             }
-            events.push(json!({"kind":"option_window","observation_schema":1,"player_hp_reached_zero":w.player_hp_reached_zero,"window_truncated":w.end_reason!="next_marker","branch_id":branch.id,"table_id":w.table_id,"exit_index":w.exit_index,
+            let host_invalid = w
+                .host_exchange
+                .as_ref()
+                .is_some_and(|h| h["reliable"] != true);
+            let output_fraction = w
+                .host_exchange
+                .as_ref()
+                .and_then(|h| h["host_damage_fraction"].as_f64());
+            let mut event = json!({"kind":"option_window","observation_schema":1,"player_hp_reached_zero":w.player_hp_reached_zero,"window_truncated":w.end_reason!="next_marker","branch_id":branch.id,"table_id":w.table_id,"exit_index":w.exit_index,
                 "player_loss_fraction":w.player_loss_fraction,"monster_loss_fraction":w.monster_loss_fraction,
                 "started_at":w.started_at,"ended_at":w.ended_at,"counter":w.counter,
                 "player_fainted":w.player_fainted,"duration_ms":w.ended_at.saturating_sub(w.started_at),
-                "end_reason":w.end_reason,"part_threshold":w.part_threshold}));
+                "end_reason":w.end_reason,"part_threshold":w.part_threshold});
+            if let Some(host) = &w.host_exchange {
+                event["observation_schema"] = json!(2);
+                event["host_exchange"] = host.clone();
+                event["host_received_damage_fraction"] = if host["local_is_host"] == true {
+                    json!(w.player_loss_fraction)
+                } else {
+                    Value::Null
+                };
+                event["player_loss_fraction"] = event["host_received_damage_fraction"].clone();
+                if host["local_is_host"] != true {
+                    event["player_hp_reached_zero"] = Value::Null;
+                }
+                event["monster_loss_fraction"] = json!(output_fraction);
+                event["invalidate"] = json!(host_invalid);
+                if host_invalid {
+                    event["invalidation_reason"] = json!("host_exchange_unreliable");
+                }
+            }
+            events.push(event);
         }
         let mut bytes = serde_json::to_vec(&Batch {
             events,
@@ -394,6 +421,7 @@ mod tests {
             part_threshold: false,
             player_hp_reached_zero: false,
             player_fainted: None,
+            host_exchange: None,
         };
         store
             .append(&baseline, std::slice::from_ref(&window))

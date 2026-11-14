@@ -5,11 +5,13 @@ pub mod compact_hook;
 pub mod config;
 pub mod deploy;
 pub mod geometry;
+pub mod host_observation;
 pub mod instrument;
 pub mod learning;
 pub mod memory;
 pub mod model;
 pub mod observations;
+pub mod party_roster;
 #[cfg(windows)]
 mod plugin;
 pub mod policy_store;

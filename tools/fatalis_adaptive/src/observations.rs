@@ -87,6 +87,18 @@ mod tests {
         }
     }
     #[test]
+    fn four_slots_track_edges_independently_and_reused_slot_resets() {
+        let mut slots: [HpObserver; 4] = std::array::from_fn(|_| Default::default());
+        for (i, s) in slots.iter_mut().enumerate() {
+            assert!(!s.push(100 + i as u64, Some((100.0, 100.0))));
+        }
+        assert!(slots[1].push(101, Some((100.0, 0.0))));
+        assert!(slots[3].push(103, Some((100.0, 0.0))));
+        assert!(!slots[0].push(100, Some((100.0, 100.0))));
+        assert!(!slots[2].push(999, Some((100.0, 0.0))));
+        assert!(!slots[1].push(101, Some((100.0, 0.0))));
+    }
+    #[test]
     fn first_sample_resets_gaps_and_tokens_are_not_events() {
         let mut o = CounterObserver::default();
         assert_eq!(o.push(s()), CounterEvents::default());

@@ -269,7 +269,9 @@ pub fn run(
     let mut observer = crate::observations::CounterObserver::default();
     let mut auxiliary_key = None;
     let mut auxiliary_available = None;
-    let mut hp_observer = crate::observations::HpObserver::default();
+    let mut hp_observers: [crate::observations::HpObserver; 4] =
+        std::array::from_fn(|_| Default::default());
+    let mut party_identity = None;
     while !stop.load(Ordering::Relaxed) {
         if watchdog.try_wait().map_err(|e| e.to_string())?.is_some() {
             return Err("watchdog lost; stop deployment and sampling".into());
@@ -306,10 +308,35 @@ pub fn run(
                 crate::observations::CounterEvents::default()
             }
         };
-        let hp_zero = hp_observer.push(
-            auxiliary.as_ref().map(|a| a.quest_token).unwrap_or(0),
-            if in_combat { s.player_hp } else { None },
-        );
+        let party_observation = if in_combat {
+            memory::read_party_observation(s.monster.as_ref().map(|m| m.addr))
+        } else {
+            Default::default()
+        };
+        let mut zero_players = Vec::new();
+        for (slot, watch) in hp_observers.iter_mut().enumerate() {
+            let member = party_observation.players.iter().find(|p| p.slot == slot);
+            let token = member.map(|p| p.token).unwrap_or(0)
+                ^ auxiliary.as_ref().map(|a| a.quest_token).unwrap_or(0);
+            if watch.push(token, member.and_then(|p| p.hp)) {
+                if let Some(member) = member {
+                    zero_players.push(member.clone());
+                }
+            }
+        }
+        let hp_zero = !zero_players.is_empty();
+        let identity = party_observation.host.as_ref().map(|h| {
+            (
+                h.player_token,
+                h.local_is_host,
+                h.damage_token,
+                h.damage_total.is_some(),
+            )
+        });
+        if in_combat && party_identity != Some(identity) {
+            runtime::log(dir,&format!("host observation candidate: {identity:?}; slot0 host convention / personal damage scope require live verification; slots={:?}",party_observation.players));
+            party_identity = Some(identity);
+        }
         if !(in_combat && s.player_hp.is_some() && s.monster.is_some())
             && session.guard.idle(now_ms)
         {
@@ -326,7 +353,9 @@ pub fn run(
             // MP is checked even when combat object reads fail. Only valid
             // combat snapshots refresh the idle timer.
             if (s.player_hp.is_some() && s.monster.is_some() || party == Some(true))
-                && session.guard.observe(party, now_ms)
+                && session
+                    .guard
+                    .observe(if party.is_some() { Some(false) } else { None }, now_ms)
             {
                 runtime::log(
                     dir,
@@ -394,16 +423,30 @@ pub fn run(
                         }
                         let timestamp =
                             u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-                        let mut logs = session.tracker.push(Some(RegisterSnapshot {
-                            monster_token: m.addr,
-                            counter,
-                            option_id,
-                            player_hp: p,
-                            player_max_hp: pmax,
-                            monster_hp: m.hp.1,
-                            monster_max_hp: m.hp.0,
-                            timestamp,
-                        }));
+                        let mut logs = session.tracker.push_host(
+                            Some(RegisterSnapshot {
+                                monster_token: m.addr,
+                                counter,
+                                option_id,
+                                player_hp: p,
+                                player_max_hp: pmax,
+                                monster_hp: m.hp.1,
+                                monster_max_hp: m.hp.0,
+                                timestamp,
+                            }),
+                            Some(party_observation.host.clone().unwrap_or(
+                                crate::host_observation::HostSample {
+                                    player_token: 0,
+                                    damage_token: 0,
+                                    local_is_host: None,
+                                    slot: None,
+                                    damage_total: None,
+                                    position: None,
+                                    distance: None,
+                                    angle: None,
+                                },
+                            )),
+                        );
                         if !auxiliary_events.parts.is_empty() {
                             // The first prototype deliberately closes at a threshold,
                             // not a claimed stagger. If a marker also changed this poll,
@@ -429,6 +472,7 @@ pub fn run(
                         active = true;
                     }
                     None => {
+                        session.tracker.host_gap();
                         read_failures += 1;
                         if last_read_log.elapsed() >= Duration::from_secs(10) {
                             runtime::log(
@@ -462,8 +506,8 @@ pub fn run(
         }
         if hp_zero || auxiliary_events.deaths > 0 || !auxiliary_events.parts.is_empty() {
             active = true;
-            if hp_zero {
-                session.observations.push(serde_json::json!({"kind":"player_hp_zero","observation_schema":1,"timestamp_ms":now_ms,"quest_id":s.quest_id,"player_hp_reached_zero":true,"attribution":"unassigned; option_window flag only if coherently observed"}));
+            for member in &zero_players {
+                session.observations.push(serde_json::json!({"kind":"player_hp_zero","observation_schema":2,"timestamp_ms":now_ms,"quest_id":s.quest_id,"player_slot":member.slot,"player_token":member.token,"is_host":member.is_host,"is_local":member.is_local,"player_hp_reached_zero":true,"attribution":"unassigned; window flag may refer to same edge"}));
             }
             if auxiliary_events.deaths > 0 {
                 session.observations.push(serde_json::json!({"kind":"quest_deaths","observation_schema":1,"timestamp_ms":now_ms,"quest_id":s.quest_id,"quest_deaths_delta":auxiliary_events.deaths,"snapshot":auxiliary,"attribution":"unassigned"}));
@@ -552,6 +596,17 @@ pub fn run(
                     s.monster.is_some()
                 ),
             );
+            if in_combat {
+                runtime::log(
+                    dir,
+                    &format!(
+                        "party roster diagnostics: {}; players={:?}; host_sample={:?}",
+                        party_observation.diagnostics,
+                        party_observation.players,
+                        party_observation.host
+                    ),
+                );
+            }
             last_diag = Instant::now();
         }
         std::thread::sleep(Duration::from_millis(config.poll_ms));

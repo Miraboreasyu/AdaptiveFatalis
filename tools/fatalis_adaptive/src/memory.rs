@@ -184,6 +184,146 @@ pub fn resolve_module_chain(offsets: &[u64]) -> Option<u64> {
     }
     chain(platform::base()?, offsets)
 }
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PartyPlayer {
+    pub slot: usize,
+    pub token: u64,
+    pub is_host: bool,
+    pub is_local: bool,
+    pub hp: Option<(f64, f64)>,
+    pub entity_token: Option<u64>,
+}
+#[derive(Clone, Debug, Default)]
+pub struct PartyObservation {
+    pub players: Vec<PartyPlayer>,
+    pub host: Option<crate::host_observation::HostSample>,
+    pub diagnostics: String,
+}
+fn position(at: u64) -> Option<[f64; 3]> {
+    Some([float(at)?, float(at + 4)?, float(at + 8)?])
+}
+fn name_bytes(at: u64) -> Option<Vec<u8>> {
+    let raw = bytes::<32>(at)?;
+    let end = raw.iter().position(|b| *b == 0)?;
+    if end == 0 {
+        return None;
+    }
+    let text = std::str::from_utf8(&raw[..end]).ok()?;
+    if text.chars().any(char::is_control) {
+        return None;
+    }
+    Some(raw[..end].to_vec())
+}
+/// Exact HunterPie save-slot name lookup; used only for unique roster matching.
+fn local_character_name(base: u64) -> Option<Vec<u8>> {
+    let first = chain(base.checked_add(0x05013950)?, &[0xa8])?;
+    let slot = u32::from_le_bytes(bytes(first.checked_add(0x44)?)?);
+    if slot > 2 {
+        return None;
+    }
+    let header = ptr(first)?.checked_add(u64::from(slot) * 0x26cc00)?;
+    name_bytes(header.checked_add(0x50)?)
+}
+/// HunterPie roster Address is member information, NOT a proven battle entity.
+/// Remote HP is unavailable until a source-backed entity mapping is established.
+pub fn read_party_observation(monster: Option<u64>) -> PartyObservation {
+    let mut out = PartyObservation::default();
+    let Some(base) = platform::base() else {
+        return out;
+    };
+    let local = chain(base + 0x0501_39a0, &[0x50, 0]);
+    let local_hp = chain(base + 0x050139a0, &[0x50, 0x7630, 0]).and_then(hp);
+    let party = read_multiplayer();
+    let roster = chain(base + 0x0501_3530, &[0x1ab0]);
+    let damage = chain(base + 0x051c_46b8, &[0x258, 0x38, 0x450, 0x8, 0x48]);
+    let name = local_character_name(base);
+    let raw = roster.and_then(bytes::<352>);
+    let entries = raw.as_ref().and_then(|b| crate::party_roster::addresses(b));
+    let mut names: [Option<Vec<u8>>; 4] = Default::default();
+    if let Some(entries) = entries {
+        for (i, entry) in entries.iter().enumerate() {
+            if *entry >= 0x10000 {
+                names[i] = name_bytes(entry + 0x49);
+            }
+        }
+    }
+    let local_slot = if party == Some(false) {
+        local.map(|_| 0)
+    } else {
+        crate::party_roster::local_slot(&names, name.as_deref())
+    };
+    out.diagnostics=format!("party={party:?} roster={roster:?} entries={entries:?} local_entity={local:?} local_name_available={} occupied={:?} local_slot={local_slot:?} local_hp_available={} damage_ptr={damage:?}; remote HP unavailable (no verified roster-to-entity mapping)",name.is_some(),names.iter().map(Option::is_some).collect::<Vec<_>>(),local_hp.is_some());
+    if party == Some(false) {
+        if let Some(token) = local {
+            out.players.push(PartyPlayer {
+                slot: 0,
+                token,
+                is_host: true,
+                is_local: true,
+                hp: local_hp,
+                entity_token: local,
+            });
+        }
+    } else if party == Some(true) {
+        if let Some(entries) = entries {
+            for slot in 0..4 {
+                if names[slot].is_none() {
+                    continue;
+                }
+                let is_local = local_slot == Some(slot);
+                out.players.push(PartyPlayer {
+                    slot,
+                    token: entries[slot],
+                    is_host: slot == 0,
+                    is_local,
+                    hp: if is_local { local_hp } else { None },
+                    entity_token: if is_local { local } else { None },
+                });
+            }
+        }
+    }
+    if let Some(host) = out.players.iter().find(|p| p.is_host) {
+        // HunterPie Player::Position: module global -> +50 -> +C0 -> +670.
+        let pos = if host.is_local {
+            chain(base + 0x050139a0, &[0x50, 0xc0, 0x670]).and_then(position)
+        } else {
+            None
+        };
+        let geometry = monster.and_then(|m| {
+            let p = pos?;
+            let q = position(m + 0x160)?;
+            let quat = [
+                float(m + 0x170)?,
+                float(m + 0x174)?,
+                float(m + 0x178)?,
+                float(m + 0x17c)?,
+            ];
+            if (quat.iter().map(|x| x * x).sum::<f64>() - 1.0).abs() > 0.1 {
+                return None;
+            }
+            let dx = p[0] - q[0];
+            let dz = p[2] - q[2];
+            let yaw = (2.0 * (quat[3] * quat[1] + quat[0] * quat[2]))
+                .atan2(1.0 - 2.0 * (quat[0] * quat[0] + quat[1] * quat[1]));
+            Some((
+                (dx * dx + dz * dz).sqrt(),
+                (dx.atan2(dz) - yaw).to_degrees().rem_euclid(360.0),
+            ))
+        });
+        out.host = Some(crate::host_observation::HostSample {
+            player_token: host.token,
+            damage_token: damage.unwrap_or(0),
+            local_is_host: local_slot.map(|slot| slot == 0),
+            slot: Some(0),
+            damage_total: damage.and_then(int).filter(|d| *d >= 0).map(f64::from),
+            position: pos,
+            distance: geometry.map(|g| g.0),
+            angle: geometry.map(|g| g.1),
+        });
+    }
+    out
+}
+
 /// Source-derived task party flag from radar/HunterPie. Zero means solo;
 /// positive values indicate multiplayer. Unknown is never interpreted as solo.
 pub fn read_auxiliary(monster: Option<u64>) -> Option<crate::observations::AuxiliarySnapshot> {

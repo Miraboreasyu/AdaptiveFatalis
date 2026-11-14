@@ -69,9 +69,9 @@ Changes carry over to later hunts; this is not an instant difficulty switch duri
 
 ## Multiplayer
 
-The included strategies exclude newly recorded multiplayer data from learning once another player is detected. You do not need to change your configuration before joining friends. Your existing single-player history is kept.
+Host-side observations can now contribute to learning during multiplayer instead of automatically discarding the entire hunt. The mod evaluates the host's received damage and personal output, not the team's total output. Unavailable or inconsistent host observations are excluded. Teammate HP is not collected.
 
-This protects learning data; it does **not** switch Fatalis back to its original behavior during multiplayer or guarantee multiplayer compatibility. Changes learned before multiplayer was detected are not undone. Third-party strategies may handle multiplayer data differently.
+Host recognition and data continuity have been checked during a hunt with players joining and leaving. Personal-output attribution still has validation limits; compatibility with every game version, joining client or mod combination is not guaranteed. This does **not** restore original AI during multiplayer. Previously excluded multiplayer history is not retroactively recovered.
 
 ## Updating
 

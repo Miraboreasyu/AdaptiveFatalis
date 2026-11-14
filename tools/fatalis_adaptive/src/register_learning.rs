@@ -56,6 +56,7 @@ pub struct CompletedRegisterWindow {
     pub player_hp_reached_zero: bool,
     /// Unknown unless backed by a separately verified observation source.
     pub player_fainted: Option<bool>,
+    pub host_exchange: Option<serde_json::Value>,
 }
 
 /// Structured, explicit diagnostics; callers can format/persist these as desired.
@@ -113,12 +114,14 @@ struct ActiveWindow {
     table_id: String,
     exit_index: usize,
     damage: DamageWindow,
+    host: Option<crate::host_observation::HostWindow>,
     player_hp_reached_zero: bool,
 }
 
 #[derive(Clone, Debug)]
 pub struct RegisterTracker {
     options: OptionMap,
+    host_sample: Option<crate::host_observation::HostSample>,
     last: Option<RegisterSnapshot>,
     active: Option<ActiveWindow>,
     completed: Vec<CompletedRegisterWindow>,
@@ -127,6 +130,7 @@ impl RegisterTracker {
     pub fn new(options: OptionMap) -> Self {
         Self {
             options,
+            host_sample: None,
             last: None,
             active: None,
             completed: Vec::new(),
@@ -159,6 +163,21 @@ impl RegisterTracker {
     /// `None` represents any failed/incoherent read. It drops the active window
     /// without assigning damage and retains event identity: a later read of the
     /// same counter MUST NOT reopen a partially observed event.
+    pub fn host_gap(&mut self) {
+        if let Some(w) = &mut self.active {
+            if let Some(h) = &mut w.host {
+                h.tick(None);
+            }
+        }
+    }
+    pub fn push_host(
+        &mut self,
+        snapshot: Option<RegisterSnapshot>,
+        host: Option<crate::host_observation::HostSample>,
+    ) -> Vec<RegisterLog> {
+        self.host_sample = host;
+        self.push(snapshot)
+    }
     pub fn push(&mut self, snapshot: Option<RegisterSnapshot>) -> Vec<RegisterLog> {
         let Some(s) = snapshot else {
             self.active = None;
@@ -207,6 +226,9 @@ impl RegisterTracker {
                         logs.push(RegisterLog::MaximumHpChanged);
                     } else {
                         w.player_hp_reached_zero |= p.player_hp > 0.0 && s.player_hp == 0.0;
+                        if let Some(h) = &mut w.host {
+                            h.tick(self.host_sample.as_ref());
+                        }
                         w.damage.tick(s.player_hp, s.monster_hp);
                         w.end = s.timestamp;
                     }
@@ -230,6 +252,9 @@ impl RegisterTracker {
                     logs.push(RegisterLog::MaximumHpChanged);
                 } else {
                     w.player_hp_reached_zero |= p.player_hp > 0.0 && s.player_hp == 0.0;
+                    if let Some(h) = &mut w.host {
+                        h.tick(self.host_sample.as_ref());
+                    }
                     w.damage.tick(s.player_hp, s.monster_hp);
                     w.end = s.timestamp;
                     self.close(&mut logs);
@@ -249,6 +274,10 @@ impl RegisterTracker {
                     table_id: table_id.clone(),
                     exit_index: *exit_index,
                     damage: DamageWindow::new(s.player_hp, s.monster_hp),
+                    host: self
+                        .host_sample
+                        .clone()
+                        .map(crate::host_observation::HostWindow::new),
                     player_hp_reached_zero: false,
                 });
                 logs.push(RegisterLog::Opened {
@@ -303,6 +332,7 @@ impl RegisterTracker {
                 part_threshold: flinch,
                 player_hp_reached_zero: w.player_hp_reached_zero,
                 player_fainted: None,
+                host_exchange: w.host.as_ref().map(|h| h.result(w.start.monster_max_hp)),
             });
             logs.push(RegisterLog::Completed {
                 counter: w.start.counter,
@@ -460,6 +490,35 @@ mod tests {
         assert!((a - b).abs() < 1e-10, "{a} != {b}");
     }
 
+    #[test]
+    fn host_output_excludes_team_damage_and_stops_at_threshold() {
+        fn h(d: f64) -> crate::host_observation::HostSample {
+            crate::host_observation::HostSample {
+                player_token: 1,
+                damage_token: 2,
+                local_is_host: Some(true),
+                slot: Some(0),
+                damage_total: Some(d),
+                position: Some([1.0, 2.0, 3.0]),
+                distance: Some(10.0),
+                angle: Some(30.0),
+            }
+        }
+        let mut t = tracker();
+        t.push_host(Some(s(1, 7, 100.0, 1000.0)), Some(h(50.0)));
+        t.push_host(Some(s(1, 7, 90.0, 800.0)), Some(h(70.0)));
+        t.part_threshold();
+        t.push_host(Some(s(1, 7, 80.0, 400.0)), Some(h(170.0)));
+        t.push_host(Some(s(2, 8, 80.0, 400.0)), Some(h(170.0)));
+        let w = &t.completed()[0];
+        near(w.monster_loss_fraction, 0.2);
+        assert_eq!(w.host_exchange.as_ref().unwrap()["host_damage"], 20.0);
+        assert_eq!(
+            w.host_exchange.as_ref().unwrap()["host_damage_fraction"],
+            0.02
+        );
+        assert!(w.part_threshold);
+    }
     #[test]
     fn part_threshold_closes_and_excludes_followup_until_next_marker() {
         let mut t = tracker();
